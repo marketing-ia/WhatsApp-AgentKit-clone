@@ -50,12 +50,22 @@ FRASES_ESCALACION = [
     "hablar por teléfono", "transfer", "transferir",
 ]
 
-# Frases para solicitar folletos/brochures
+# Frases EXPLÍCITAS para solicitar folletos — solo cuando el cliente claramente lo pide
+# IMPORTANTE: usar frases específicas, no palabras sueltas genéricas como "información" o "material"
 FRASES_FOLLETO = [
-    "folleto", "brochure", "catálogo", "catalogo", "presentación", "presentacion",
-    "información por escrito", "informacion por escrito", "pdf", "portafolio",
-    "más información", "mas informacion", "material", "documento",
-    "envíame información", "enviame informacion", "mándame información", "mandame informacion",
+    "envíame el folleto", "enviame el folleto",
+    "mándame el folleto", "mandame el folleto",
+    "envíame el brochure", "enviame el brochure",
+    "quiero el folleto", "quiero un folleto",
+    "quiero el brochure", "quiero un brochure",
+    "puedes enviarme el folleto", "puedes mandarme el folleto",
+    "envíame información en pdf", "enviame informacion en pdf",
+    "mándame el pdf", "mandame el pdf",
+    "envíame el pdf", "enviame el pdf",
+    "quiero el pdf", "quiero ver el pdf",
+    "tienes folleto", "tienes brochure",
+    "me puedes enviar el folleto", "me puedes mandar el folleto",
+    "me puedes enviar un folleto", "me puedes mandar un folleto",
 ]
 
 
@@ -66,7 +76,10 @@ def _solicita_humano(texto: str) -> bool:
 
 
 def _solicita_folleto(texto: str) -> bool:
-    """Detecta si el cliente está pidiendo un folleto, PDF o material informativo."""
+    """
+    Detecta si el cliente está pidiendo EXPLÍCITAMENTE un folleto o PDF.
+    Usa frases completas para evitar falsos positivos en conversaciones normales.
+    """
     texto_lower = texto.lower()
     return any(frase in texto_lower for frase in FRASES_FOLLETO)
 
