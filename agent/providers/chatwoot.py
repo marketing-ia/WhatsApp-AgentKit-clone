@@ -11,6 +11,7 @@ Flujo:
 """
 
 import os
+import base64
 import logging
 import httpx
 from fastapi import Request
@@ -92,19 +93,122 @@ class ProveedorChatwoot(ProveedorWhatsApp):
         nombre_remitente = sender.get("name", "Cliente")
         mensaje_id = str(body.get("id", ""))
 
+        # Procesar adjuntos: audio → transcripción, imagen → base64
+        adjuntos = body.get("attachments", []) or []
+        imagen_b64 = None
+        imagen_mime = None
+        es_audio = False
+
+        for adj in adjuntos:
+            file_type = adj.get("file_type", "")
+            data_url = adj.get("data_url", "") or ""
+
+            if file_type in ("audio", "voice") and not contenido:
+                transcripcion = await self._transcribir_audio(data_url)
+                if transcripcion:
+                    contenido = transcripcion  # Solo Lucy ve este texto; el historial guardará [Nota de voz]
+                    es_audio = True
+                    logger.info(f"Audio transcrito ({len(transcripcion)} chars): {transcripcion[:60]}")
+
+            elif file_type == "image" and not imagen_b64:
+                b64, mime = await self._descargar_imagen_b64(data_url)
+                if b64:
+                    imagen_b64 = b64
+                    imagen_mime = mime
+                    if not contenido:
+                        contenido = "[Foto recibida]"
+                    logger.info(f"Imagen recibida ({mime}), {len(b64)} chars b64")
+
+        if not contenido:
+            return []
+
         logger.info(f"Mensaje de '{nombre_remitente}' en conversación {conversation_id}: {contenido[:50]}")
 
         return [MensajeEntrante(
-            telefono=conversation_id,   # Usamos conversation_id como identificador de memoria
+            telefono=conversation_id,
             texto=contenido,
             mensaje_id=mensaje_id,
             es_propio=False,
+            imagen_b64=imagen_b64,
+            imagen_mime=imagen_mime,
             extra={
                 "conversation_id": conversation_id,
                 "nombre_remitente": nombre_remitente,
                 "inbox_id": inbox_id,
+                "es_audio": es_audio,
             }
         )]
+
+    async def _transcribir_audio(self, url: str) -> str | None:
+        """
+        Descarga un archivo de audio desde Chatwoot y lo transcribe con OpenAI Whisper.
+        Requiere OPENAI_API_KEY. Retorna el texto transcrito o None si falla.
+        """
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key:
+            logger.warning("OPENAI_API_KEY no configurado — no se puede transcribir audio")
+            return None
+        if not url:
+            return None
+
+        try:
+            # Descargar audio
+            headers_cw = {"api_access_token": self.api_token} if self.api_token else {}
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(url, headers=headers_cw, follow_redirects=True)
+                if r.status_code != 200:
+                    logger.error(f"Error descargando audio: {r.status_code}")
+                    return None
+                audio_bytes = r.content
+                content_type = r.headers.get("content-type", "audio/ogg")
+
+            # Determinar extensión
+            ext_map = {
+                "audio/ogg": "ogg", "audio/opus": "ogg",
+                "audio/mpeg": "mp3", "audio/mp4": "m4a",
+                "audio/webm": "webm", "audio/wav": "wav",
+            }
+            ext = ext_map.get(content_type.split(";")[0].strip(), "ogg")
+
+            # Transcribir con OpenAI Whisper
+            from openai import AsyncOpenAI
+            oai = AsyncOpenAI(api_key=openai_key)
+            import io
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = f"audio.{ext}"
+
+            transcripcion = await oai.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="es",
+            )
+            return transcripcion.text.strip()
+
+        except Exception as e:
+            logger.error(f"Error transcribiendo audio: {e}")
+            return None
+
+    async def _descargar_imagen_b64(self, url: str) -> tuple[str | None, str]:
+        """
+        Descarga una imagen y la convierte a base64 para Claude Vision.
+        Retorna (base64_string, mime_type) o (None, '').
+        """
+        if not url:
+            return None, ""
+        try:
+            headers_cw = {"api_access_token": self.api_token} if self.api_token else {}
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.get(url, headers=headers_cw, follow_redirects=True)
+                if r.status_code != 200:
+                    return None, ""
+                mime = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                if not mime.startswith("image/"):
+                    mime = "image/jpeg"
+                b64 = base64.b64encode(r.content).decode()
+                return b64, mime
+        except Exception as e:
+            logger.error(f"Error descargando imagen: {e}")
+            return None, ""
 
     async def _obtener_telefono_contacto(self, conversation_id: str) -> str | None:
         """

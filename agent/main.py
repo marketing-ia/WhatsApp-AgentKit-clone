@@ -2,7 +2,7 @@
 # Generado por AgentKit
 
 """
-Servidor principal del agente Lucy.
+Servidor principal del agente de WhatsApp.
 Recibe webhooks de Chatwoot, procesa con Claude y responde.
 Incluye endpoints de admin para pausar/reanudar conversaciones (intervención humana).
 """
@@ -25,7 +25,10 @@ from agent.memory import (
     listar_pausadas,
 )
 from agent.providers import obtener_proveedor
-from agent.tools import llamar_a_roy, obtener_folletos
+from agent.tools import (
+    llamar_a_roy, obtener_folletos, llamar_prospecto,
+    obtener_slots_disponibles, formatear_slots_para_lucy, agendar_cita_ghl,
+)
 
 load_dotenv()
 
@@ -45,7 +48,7 @@ PORT = int(os.getenv("PORT", 8000))
 FRASES_ESCALACION = [
     "hablar con humano", "hablar con una persona", "hablar con alguien",
     "quiero un agente", "agente humano", "persona real", "asesor",
-    "con una persona", "con alguien del equipo", "quiero hablar con Roy",
+    "con una persona", "con alguien del equipo", "quiero hablar con alguien",
     "quiero que me llamen", "que me llame", "llamada", "llamarme",
     "hablar por teléfono", "transfer", "transferir",
 ]
@@ -69,10 +72,38 @@ FRASES_FOLLETO = [
 ]
 
 
+# Palabras clave para detectar intención de agendar cita
+PALABRAS_CITA = [
+    "agendar", "cita", "reunión", "reunion", "appointment", "horario disponible",
+    "cuándo podemos", "cuando podemos", "qué horarios", "que horarios",
+    "disponibilidad", "me puedo reunir", "podemos hablar", "quiero una cita",
+    "quiero una reunión", "quiero una reunion", "programar",
+]
+
+# Palabras clave de cotización de seguros (inyecta el URL proactivamente)
+PALABRAS_COTIZACION = [
+    "cotización", "cotizacion", "cotizar", "cuánto cuesta", "cuanto cuesta",
+    "precio del seguro", "cuánto vale", "cuanto vale", "costo del plan",
+    "cuánto es", "cuanto es el seguro", "quiero saber el precio",
+]
+
+
 def _solicita_humano(texto: str) -> bool:
     """Detecta si el cliente está pidiendo intervención humana o llamada."""
     texto_lower = texto.lower()
     return any(frase in texto_lower for frase in FRASES_ESCALACION)
+
+
+def _quiere_cita(texto: str) -> bool:
+    """Detecta si el cliente quiere agendar una cita."""
+    texto_lower = texto.lower()
+    return any(p in texto_lower for p in PALABRAS_CITA)
+
+
+def _quiere_cotizacion(texto: str) -> bool:
+    """Detecta si el cliente está preguntando por precios o cotizaciones de seguro."""
+    texto_lower = texto.lower()
+    return any(p in texto_lower for p in PALABRAS_COTIZACION)
 
 
 def _solicita_folleto(texto: str) -> bool:
@@ -101,12 +132,12 @@ async def lifespan(app: FastAPI):
     await inicializar_db()
     logger.info("Base de datos inicializada")
     logger.info(f"Proveedor activo: {proveedor.__class__.__name__}")
-    logger.info(f"Servidor Lucy listo en puerto {PORT}")
+    logger.info(f"Servidor AgentKit listo en puerto {PORT}")
     yield
 
 
 app = FastAPI(
-    title="Lucy — Agente IA de Roy Mota / Marketing IA",
+    title="AgentKit — Agente IA de WhatsApp",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -114,7 +145,8 @@ app = FastAPI(
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "agente": "Lucy", "negocio": "Roy Mota / Marketing IA"}
+    agente_nombre = os.getenv("AGENT_NAME", "Agente")
+    return {"status": "ok", "agente": agente_nombre, "version": "3.0"}
 
 
 @app.get("/webhook")
@@ -150,15 +182,16 @@ async def webhook_handler(request: Request):
             # Detectar si el cliente solicita hablar con un humano / transferencia de llamada
             if _solicita_humano(msg.texto):
                 await pausar_conversacion(conversation_id, motivo="cliente solicitó humano")
+                _tel = os.getenv("TRANSFER_NUMBER_DISPLAY", "")
+                _tel_txt = f" También puedes llamar directamente al {_tel}." if _tel else ""
                 aviso = (
-                    "Claro, le aviso a Roy en este momento para que te contacte 🙏 "
-                    "Él te llamará o escribirá a la brevedad. "
-                    "También puedes llamar directamente al +1 (407) 383-8844."
+                    f"Claro, le aviso a nuestro equipo en este momento para que te contacte 🙏 "
+                    f"Alguien te llamará o escribirá a la brevedad.{_tel_txt}"
                 )
                 await guardar_mensaje(conversation_id, "user", msg.texto)
                 await guardar_mensaje(conversation_id, "assistant", aviso)
                 await proveedor.enviar_mensaje(conversation_id, aviso)
-                # Notificar a Roy via llamada Twilio
+                # Notificar al propietario via llamada Twilio
                 await llamar_a_roy(nombre_cliente="Cliente en WhatsApp", motivo=msg.texto[:100])
                 logger.info(f"[{conversation_id}] Escalada a humano — llamada Twilio activada — Lucy pausada")
                 continue
@@ -174,8 +207,8 @@ async def webhook_handler(request: Request):
                     # No hay folletos configurados → respuesta genérica
                     aviso_folleto = (
                         "Con gusto te comparto nuestro material informativo 📄 "
-                        "Para recibirlo, escríbenos a info@romainsurancegroup.com "
-                        "o llama al +1 (407) 383-8844."
+                        "Para recibirlo, escríbenos a info@tunegocio.com"
+                        "o llama al tu número de contacto."
                     )
                     await guardar_mensaje(conversation_id, "assistant", aviso_folleto)
                     await proveedor.enviar_mensaje(conversation_id, aviso_folleto)
@@ -194,8 +227,8 @@ async def webhook_handler(request: Request):
                         await proveedor.enviar_mensaje(
                             conversation_id,
                             f"📄 *{folleto['nombre']}*\n{folleto['descripcion']}\n\n"
-                            "Para recibir este material, escríbenos a info@romainsurancegroup.com "
-                            "o llama al +1 (407) 383-8844.",
+                            "Para recibir este material, escríbenos a info@tunegocio.com"
+                            "o llama al tu número de contacto.",
                         )
                         logger.info(f"[{conversation_id}] Folleto sin URL — mensaje alternativo: {folleto['nombre']}")
                         continue
@@ -218,11 +251,75 @@ async def webhook_handler(request: Request):
 
                 continue
 
-            # Flujo normal: obtener historial → generar respuesta → guardar → enviar
+            # ── Flujo normal: historial → contexto → Claude → guardar → enviar ──
             historial = await obtener_historial(conversation_id)
-            respuesta = await generar_respuesta(msg.texto, historial)
+            contexto_extra = None
 
-            await guardar_mensaje(conversation_id, "user", msg.texto)
+            # Inyectar slots disponibles cuando detectamos intención de cita
+            if _quiere_cita(msg.texto):
+                slots = await obtener_slots_disponibles(dias_adelante=7)
+                if slots:
+                    texto_slots = formatear_slots_para_lucy(slots)
+                    contexto_extra = (
+                        f"HORARIOS DISPONIBLES PARA CITA ({os.getenv('AGENT_NAME', 'el negocio')}):\n{texto_slots}\n"
+                        "Preséntale estos horarios al cliente para que elija uno. "
+                        "Cuando confirme nombre, email, teléfono y horario, incluye al FINAL de tu respuesta "
+                        "EXACTAMENTE este marcador (sin modificar el formato):\n"
+                        '[BOOKING:{"nombre":"NOMBRE","email":"EMAIL","telefono":"TEL","slot":"SLOT_ISO"}]'
+                    )
+                    logger.info(f"[{conversation_id}] Slots inyectados: {len(slots)} disponibles")
+
+            # Inyectar link de cotización cuando preguntan por precios de seguro
+            if _quiere_cotizacion(msg.texto) and not contexto_extra:
+                quote_url = os.getenv("QUOTE_URL", "https://tucotizacion.com")
+                contexto_extra = (
+                    "El cliente está preguntando por precios o cotizaciones. "
+                    "Recuérdale que la cotización es gratuita y sin compromiso. "
+                    f"Incluye en tu respuesta el link directo: {quote_url}"
+                )
+
+            respuesta = await generar_respuesta(
+                msg.texto,
+                historial,
+                imagen_b64=msg.imagen_b64,
+                imagen_mime=msg.imagen_mime,
+                contexto_extra=contexto_extra,
+            )
+
+            # Detectar marcador de reserva [BOOKING:{...}] en la respuesta de Lucy
+            import re, json as _json
+            booking_match = re.search(r'\[BOOKING:(\{[^}]+\})\]', respuesta, re.DOTALL)
+            if booking_match:
+                try:
+                    booking_data = _json.loads(booking_match.group(1))
+                    resultado = await agendar_cita_ghl(
+                        nombre=booking_data.get("nombre", ""),
+                        email=booking_data.get("email", ""),
+                        telefono=booking_data.get("telefono", ""),
+                        slot_iso=booking_data.get("slot", ""),
+                    )
+                    if resultado.get("ok"):
+                        from datetime import datetime
+                        try:
+                            dt = datetime.fromisoformat(booking_data["slot"])
+                            DIAS = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+                            MESES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]
+                            fecha_texto = f"{DIAS[dt.weekday()]} {dt.day} de {MESES[dt.month-1]} a las {dt.strftime('%-I:%M %p').lower()}"
+                        except Exception:
+                            fecha_texto = booking_data.get("slot", "")
+                        confirmacion = f"¡Cita agendada! el {fecha_texto}. Recibirás un email de confirmación. ¡Nos vemos! 📅"
+                    else:
+                        confirmacion = "Hubo un problema al agendar la cita. Por favor llama a nuestro número de contacto y lo coordinamos en seguida."
+                    # Reemplazar el marcador con la confirmación
+                    respuesta = re.sub(r'\[BOOKING:[^\]]+\]', confirmacion, respuesta)
+                    logger.info(f"[{conversation_id}] Cita GHL agendada — resultado: {resultado}")
+                except Exception as e:
+                    respuesta = re.sub(r'\[BOOKING:[^\]]+\]', '', respuesta)
+                    logger.error(f"[{conversation_id}] Error procesando BOOKING: {e}")
+
+            # Guardar en historial: audio → "[Nota de voz]" (la transcripción no se persiste ni se muestra)
+            texto_historial = "[Nota de voz]" if msg.extra.get("es_audio") else msg.texto
+            await guardar_mensaje(conversation_id, "user", texto_historial)
             await guardar_mensaje(conversation_id, "assistant", respuesta)
 
             exito = await proveedor.enviar_mensaje(conversation_id, respuesta)
@@ -284,4 +381,35 @@ async def admin_listar_pausadas():
     return {
         "total": len(pausadas),
         "conversaciones": pausadas,
+    }
+
+
+@app.post("/admin/llamar/{telefono}")
+async def admin_llamar_prospecto(
+    telefono: str,
+    nombre: str = "Prospecto",
+    motivo: str = "",
+):
+    """
+    Dispara una llamada Twilio outbound al teléfono del prospecto.
+    Dispara desde n8n, Postman o cualquier herramienta.
+
+    Ejemplo: POST /admin/llamar/+15551234567?nombre=Juan+Garcia
+    El prospecto recibe una llamada de voz avisando que el equipo lo contactará.
+    """
+    # Normalizar formato: +15551234567 o 15551234567
+    tel = telefono if telefono.startswith("+") else f"+{telefono}"
+    exito = await llamar_prospecto(tel, nombre=nombre, mensaje_personalizado=motivo)
+    if exito:
+        logger.info(f"Llamada outbound iniciada a {tel} — {nombre}")
+        return {
+            "status": "llamando",
+            "telefono": tel,
+            "nombre": nombre,
+            "mensaje": f"Llamada a {nombre} ({tel}) iniciada via Twilio.",
+        }
+    return {
+        "status": "error",
+        "telefono": tel,
+        "mensaje": "No se pudo iniciar la llamada. Verifica las credenciales de Twilio.",
     }

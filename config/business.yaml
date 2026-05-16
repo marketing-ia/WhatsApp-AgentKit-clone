@@ -23,18 +23,29 @@ agente:
 
 contacto_propietario:
   nombre: "[TU NOMBRE]"
-  whatsapp: "[+1XXXXXXXXXX]"    # Tu número — Lucy avisará aquí cuando alguien pida llamada
+  whatsapp: "[+1XXXXXXXXXX]"    # Tu número — el agente avisará aquí cuando pidan llamada
   telefono: "[+1XXXXXXXXXX]"
 
+calendario:
+  # Obtén el calendar ID en GoHighLevel → Settings → Calendars
+  ghl_calendar_id: ""          # ← pegar el ID de tu calendario GHL aquí
+  nombre: "[NOMBRE DEL CALENDARIO]"
+  duracion_cita_min: 30
+  timezone: "America/New_York"  # Zona horaria del negocio
+
 folletos:
-  # Agrega los PDFs que el agente enviará cuando el cliente los pida.
-  # Cómo agregar: sube el PDF a Google Drive → Archivo → Compartir → "Cualquiera con el enlace" → copiar URL
+  # Agrega los PDFs que el agente enviará cuando el cliente los pida explícitamente.
+  # Cómo agregar:
+  #   1. Sube el PDF a Google Drive
+  #   2. Clic derecho → Compartir → "Cualquiera con el enlace"
+  #   3. Copia el link: https://drive.google.com/file/d/XXXXXXXX/view
+  #   4. Convierte a link directo: https://drive.usercontent.google.com/download?id=XXXXXXXX&export=download&authuser=0
   - nombre: "[Nombre del folleto]"
     descripcion: "[Descripción del contenido]"
     archivo: "folleto.pdf"
-    url: ""    # ← pegar URL de Google Drive aquí
+    url: ""    # ← pegar URL de descarga directa de Google Drive aquí
     negocio: "principal"
 
 metadata:
   creado: ""
-  version: "2.1"
+  version: "3.0"

@@ -14,11 +14,13 @@ from fastapi import Request
 @dataclass
 class MensajeEntrante:
     """Mensaje normalizado — mismo formato independientemente del proveedor."""
-    telefono: str       # Número del remitente (o conversation_id para Chatwoot)
-    texto: str          # Contenido del mensaje
-    mensaje_id: str     # ID único del mensaje
-    es_propio: bool     # True si lo envió el agente (se ignora)
-    extra: dict = field(default_factory=dict)  # Datos adicionales específicos del proveedor
+    telefono: str               # Número del remitente (o conversation_id para Chatwoot)
+    texto: str                  # Contenido del mensaje (o transcripción de audio)
+    mensaje_id: str             # ID único del mensaje
+    es_propio: bool             # True si lo envió el agente (se ignora)
+    extra: dict = field(default_factory=dict)
+    imagen_b64: str | None = None       # Imagen en base64 (para fotos recibidas)
+    imagen_mime: str | None = None      # MIME type de la imagen (image/jpeg, etc.)
 
 
 class ProveedorWhatsApp(ABC):

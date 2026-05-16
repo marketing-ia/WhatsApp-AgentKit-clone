@@ -30,7 +30,7 @@ def _cargar_config() -> dict:
 def cargar_system_prompt() -> str:
     return _cargar_config().get(
         "system_prompt",
-        "Eres Lucy, asistente virtual de Roy Mota / Marketing IA. Responde en español con calidez."
+        "Eres un asistente virtual. Responde en español con calidez."
     )
 
 
@@ -48,13 +48,22 @@ def obtener_mensaje_fallback() -> str:
     )
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
+async def generar_respuesta(
+    mensaje: str,
+    historial: list[dict],
+    imagen_b64: str | None = None,
+    imagen_mime: str | None = None,
+    contexto_extra: str | None = None,
+) -> str:
     """
     Genera una respuesta usando Claude API.
 
     Args:
-        mensaje: El mensaje nuevo del cliente
+        mensaje: El mensaje nuevo del cliente (texto o transcripción de voz)
         historial: Mensajes anteriores de esta conversación
+        imagen_b64: Imagen en base64 (si el cliente mandó una foto)
+        imagen_mime: MIME type de la imagen
+        contexto_extra: Contexto adicional a inyectar (ej: slots disponibles)
 
     Returns:
         Respuesta generada por Claude
@@ -63,13 +72,31 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
         return obtener_mensaje_fallback()
 
     system_prompt = cargar_system_prompt()
+    if contexto_extra:
+        system_prompt = f"{system_prompt}\n\n---\n{contexto_extra}"
 
-    # Construir lista de mensajes con historial + mensaje actual
     mensajes = [
         {"role": m["role"], "content": m["content"]}
         for m in historial
     ]
-    mensajes.append({"role": "user", "content": mensaje})
+
+    # Construir el contenido del mensaje actual (texto + imagen opcional)
+    if imagen_b64 and imagen_mime:
+        contenido_usuario = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": imagen_mime,
+                    "data": imagen_b64,
+                },
+            },
+            {"type": "text", "text": mensaje or "¿Qué ves en esta imagen?"},
+        ]
+    else:
+        contenido_usuario = mensaje
+
+    mensajes.append({"role": "user", "content": contenido_usuario})
 
     try:
         response = await client.messages.create(
