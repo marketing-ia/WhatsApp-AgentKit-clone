@@ -1,0 +1,139 @@
+{
+  "name": "WF-02 — GHL Oportunidad → WhatsApp por Etapa",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ghl-opportunity",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "wh-ghl-02",
+      "name": "📥 Webhook GHL Oportunidad",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "agentkit-ghl-opportunity"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// Solo procesar cambios de etapa y nuevas oportunidades\nconst validEvents = ['OpportunityCreate', 'OpportunityUpdate', 'OpportunityStageUpdate'];\nif (!validEvents.includes(body.type)) {\n  return [{ json: { skip: true, reason: 'event_not_relevant: ' + body.type } }];\n}\n\n// GHL puede enviar el contacto en distintos campos según versión\nconst opp = body.opportunity || body || {};\nconst contact = opp.contact || body.contact || {};\n\n// Extraer teléfono limpio (quitar +1 para Evolution API)\nlet phone = (contact.phone || contact.phoneNumber || body.phone || '').replace(/\\D/g, '');\nif (phone.startsWith('1') && phone.length === 11) phone = phone.slice(1); // quitar +1 EEUU\n\nif (!phone) {\n  return [{ json: { skip: true, reason: 'no_phone' } }];\n}\n\nconst stageName = (opp.stage && opp.stage.name) || opp.stageName || body.stageName || 'Sin etapa';\nconst firstName = contact.firstName || contact.name || body.firstName || 'Cliente';\nconst lastName  = contact.lastName || body.lastName || '';\nconst fullName  = `${firstName} ${lastName}`.trim();\nconst value     = opp.monetaryValue || opp.value || 0;\nconst locationId = body.locationId || '';\n\n// Mapeo de etapas → mensajes personalizados\nconst messages = {\n  // Seguros\n  'New Lead':              `👋 Hola ${firstName}! Vi que estás buscando opciones de seguro. ¿Tienes 5 minutos para que te explique las mejores coberturas disponibles para ti?`,\n  'Contacted':             `Hola ${firstName} 😊 Quería hacer seguimiento a tu consulta de seguros. ¿Pudiste revisar la información que te enviamos?`,\n  'Appointment Scheduled': `¡Perfecto ${firstName}! ✅ Tu cita está confirmada. Te enviaré un recordatorio 1 hora antes. Si necesitas reagendar, escríbeme aquí mismo.`,\n  'Proposal Sent':         `Hola ${firstName} 📋 Ya te envié la propuesta de seguro a tu correo. ¿La pudiste revisar? Cualquier duda, aquí estoy.`,\n  'Follow Up':             `Hola ${firstName} 👋 Solo quería asegurarme de que hayas recibido toda la información. ¿Hay algo en lo que pueda ayudarte hoy?`,\n  'Won':                   `¡Felicidades ${firstName}! 🎉 Tu póliza está activa. Recibirás todos los documentos en tu correo. ¡Bienvenido a la familia!`,\n  'Lost':                  null, // No enviar mensaje si se perdió\n  // Clínicas / Dentistas\n  'Cita Agendada':         `Hola ${firstName} 👩‍⚕️ Tu cita está confirmada. Te esperamos. Si necesitas cambiar el horario, responde aquí.`,\n  'Cita Completada':       `Gracias por visitarnos ${firstName} 🙏 ¿Cómo te sentiste? Tu opinión nos ayuda a mejorar.`,\n  'Seguimiento':           `Hola ${firstName}, ¿cómo te has sentido después de tu última visita? Estamos aquí para cualquier duda.`,\n  // Realtor\n  'Property Interest':     `Hola ${firstName} 🏠 Vi que estás interesado en propiedades. ¿Te gustaría agendar una visita esta semana?`,\n  'Showing Scheduled':     `¡Excelente ${firstName}! 🔑 Tu visita a la propiedad está confirmada. Te envío la dirección y detalles por aquí.`,\n  'Offer Made':            `Hola ${firstName} 📝 Tu oferta fue enviada. Estaremos en contacto tan pronto tengamos respuesta.`,\n};\n\nconst messageText = messages[stageName];\n\nif (messageText === null) {\n  return [{ json: { skip: true, reason: 'stage_no_message', stageName } }];\n}\n\nreturn [{\n  json: {\n    skip: !messageText,\n    phone,\n    fullName,\n    firstName,\n    stageName,\n    value,\n    locationId,\n    instance: 'lucy',\n    messageText: messageText || `Hola ${firstName}, tenemos novedades sobre tu proceso. ¿Tienes un momento?`,\n    eventType: body.type,\n    opportunityId: opp.id || body.opportunityId || ''\n  }\n}];"
+      },
+      "id": "code-parse-02",
+      "name": "🔍 Parsear Evento GHL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-skip-02",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-02",
+      "name": "❓ ¿Ignorar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip-02",
+      "name": "🚫 Sin acción",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/{{ $json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.phone, text: $json.messageText }) }}",
+        "options": {}
+      },
+      "id": "http-send-wa-02",
+      "name": "📱 Enviar WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/ghl_message_logs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone: $('🔍 Parsear Evento GHL').first().json.phone, contact_name: $('🔍 Parsear Evento GHL').first().json.fullName, stage: $('🔍 Parsear Evento GHL').first().json.stageName, location_id: $('🔍 Parsear Evento GHL').first().json.locationId, opportunity_id: $('🔍 Parsear Evento GHL').first().json.opportunityId, message_sent: $('🔍 Parsear Evento GHL').first().json.messageText }) }}",
+        "options": {}
+      },
+      "id": "http-log-02",
+      "name": "💾 Registrar en Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end-02",
+      "name": "✅ Mensaje enviado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1340, 400]
+    }
+  ],
+  "connections": {
+    "📥 Webhook GHL Oportunidad": {
+      "main": [[{ "node": "🔍 Parsear Evento GHL", "type": "main", "index": 0 }]]
+    },
+    "🔍 Parsear Evento GHL": {
+      "main": [[{ "node": "❓ ¿Ignorar?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Ignorar?": {
+      "main": [
+        [{ "node": "🚫 Sin acción", "type": "main", "index": 0 }],
+        [{ "node": "📱 Enviar WhatsApp", "type": "main", "index": 0 }]
+      ]
+    },
+    "📱 Enviar WhatsApp": {
+      "main": [[{ "node": "💾 Registrar en Supabase", "type": "main", "index": 0 }]]
+    },
+    "💾 Registrar en Supabase": {
+      "main": [[{ "node": "✅ Mensaje enviado", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "wf02-v1",
+  "meta": { "instanceId": "agentkit", "templateCredsSetupCompleted": true },
+  "id": "WF02-AGENTKIT",
+  "tags": [{ "createdAt": "2026-05-15", "updatedAt": "2026-05-15", "id": "agentkit", "name": "AgentKit" }]
+}

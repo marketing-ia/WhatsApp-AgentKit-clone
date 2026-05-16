@@ -1,0 +1,40 @@
+# Configuración del negocio — Generado por AgentKit
+# Este archivo es generado automáticamente durante el setup.
+# Ejecuta: claude (en la raíz del proyecto) y sigue las instrucciones.
+
+negocio:
+  nombre: "[NOMBRE DE TU NEGOCIO]"
+  descripcion: "[Describe tu negocio aquí — qué vendes, a quién, dónde]"
+  horario: "Lunes a Viernes de 9:00 AM a 5:00 PM"
+  sitio_web: ""
+  telefono: ""
+  email: ""
+  ubicacion: ""
+
+agente:
+  nombre: "[NOMBRE DEL AGENTE]"
+  tono: "empático y cálido"    # opciones: profesional, amigable, vendedor, empático
+  casos_de_uso:
+    - "FAQ"
+    # - "citas"
+    # - "leads"
+    # - "pedidos"
+    # - "soporte"
+
+contacto_propietario:
+  nombre: "[TU NOMBRE]"
+  whatsapp: "[+1XXXXXXXXXX]"    # Tu número — Lucy avisará aquí cuando alguien pida llamada
+  telefono: "[+1XXXXXXXXXX]"
+
+folletos:
+  # Agrega los PDFs que el agente enviará cuando el cliente los pida.
+  # Cómo agregar: sube el PDF a Google Drive → Archivo → Compartir → "Cualquiera con el enlace" → copiar URL
+  - nombre: "[Nombre del folleto]"
+    descripcion: "[Descripción del contenido]"
+    archivo: "folleto.pdf"
+    url: ""    # ← pegar URL de Google Drive aquí
+    negocio: "principal"
+
+metadata:
+  creado: ""
+  version: "2.1"

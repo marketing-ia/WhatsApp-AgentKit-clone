@@ -1,0 +1,228 @@
+{
+  "name": "WF-05 — Sync Contactos Evolution → GHL (cada hora)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 1 }] }
+      },
+      "id": "sched-05",
+      "name": "⏰ Cada Hora",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/contacts/lucy",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "limit", "value": "100" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-get-contacts-05",
+      "name": "📥 Obtener Contactos Evolution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// Evolution puede devolver { data: [...] } o directamente un array\nconst contacts = Array.isArray(data) ? data : (data.data || data.contacts || []);\n\nif (!contacts.length) {\n  return [{ json: { skip: true, reason: 'no_contacts', count: 0 } }];\n}\n\n// Filtrar y limpiar contactos\nconst cleaned = contacts\n  .filter(c => c.pushName && c.remoteJid && c.remoteJid.includes('@s.whatsapp.net'))\n  .map(c => {\n    const jid = c.remoteJid || '';\n    const phone = jid.replace('@s.whatsapp.net', '');\n    const phoneE164 = phone.length === 10 ? '+1' + phone : '+' + phone;\n\n    return {\n      phone,\n      phoneE164,\n      pushName: c.pushName || '',\n      firstName: c.pushName ? c.pushName.split(' ')[0] : 'Cliente',\n      lastName: c.pushName ? c.pushName.split(' ').slice(1).join(' ') : '',\n      jid\n    };\n  })\n  .filter(c => c.phone.length >= 10); // solo teléfonos válidos\n\nreturn cleaned.map(c => ({ json: c }));"
+      },
+      "id": "code-parse-05",
+      "name": "🔍 Filtrar y Limpiar Contactos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-skip-05",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-05",
+      "name": "❓ ¿Hay contactos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip-05",
+      "name": "😴 Sin contactos nuevos",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 160]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/contact_sync",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "phone", "value": "=eq.{{ $json.phone }}" },
+            { "name": "select", "value": "phone,ghl_contact_id" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-check-supabase-05",
+      "name": "🔎 ¿Ya sincronizado?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-already-synced",
+              "leftValue": "={{ Array.isArray($json) && $json.length > 0 && $json[0].ghl_contact_id }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-synced-05",
+      "name": "❓ ¿Ya en GHL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 380]
+    },
+    {
+      "parameters": {},
+      "id": "noop-already-05",
+      "name": "⏭ Ya sincronizado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1560, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.GHL_BASE_URL || 'https://services.leadconnectorhq.com' }}/contacts/",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GHL_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Version", "value": "2021-07-28" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ firstName: $('🔍 Filtrar y Limpiar Contactos').item.json.firstName, lastName: $('🔍 Filtrar y Limpiar Contactos').item.json.lastName, phone: $('🔍 Filtrar y Limpiar Contactos').item.json.phoneE164, locationId: $env.GHL_LOCATION_SEGUROS || '', source: 'WhatsApp AgentKit', tags: ['whatsapp', 'agentkit'] }) }}",
+        "options": {}
+      },
+      "id": "http-create-ghl-05",
+      "name": "➕ Crear Contacto en GHL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1560, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/contact_sync",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "resolution=merge-duplicates" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone: $('🔍 Filtrar y Limpiar Contactos').item.json.phone, push_name: $('🔍 Filtrar y Limpiar Contactos').item.json.pushName, ghl_contact_id: $json.contact?.id || $json.id || '', evolution_instance: 'lucy', last_synced_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "id": "http-upsert-supabase-05",
+      "name": "💾 Guardar Sync en Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1780, 480]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end-05",
+      "name": "✅ Contacto sincronizado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2000, 480]
+    }
+  ],
+  "connections": {
+    "⏰ Cada Hora": {
+      "main": [[{ "node": "📥 Obtener Contactos Evolution", "type": "main", "index": 0 }]]
+    },
+    "📥 Obtener Contactos Evolution": {
+      "main": [[{ "node": "🔍 Filtrar y Limpiar Contactos", "type": "main", "index": 0 }]]
+    },
+    "🔍 Filtrar y Limpiar Contactos": {
+      "main": [[{ "node": "❓ ¿Hay contactos?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Hay contactos?": {
+      "main": [
+        [{ "node": "😴 Sin contactos nuevos", "type": "main", "index": 0 }],
+        [{ "node": "🔎 ¿Ya sincronizado?", "type": "main", "index": 0 }]
+      ]
+    },
+    "🔎 ¿Ya sincronizado?": {
+      "main": [[{ "node": "❓ ¿Ya en GHL?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Ya en GHL?": {
+      "main": [
+        [{ "node": "⏭ Ya sincronizado", "type": "main", "index": 0 }],
+        [{ "node": "➕ Crear Contacto en GHL", "type": "main", "index": 0 }]
+      ]
+    },
+    "➕ Crear Contacto en GHL": {
+      "main": [[{ "node": "💾 Guardar Sync en Supabase", "type": "main", "index": 0 }]]
+    },
+    "💾 Guardar Sync en Supabase": {
+      "main": [[{ "node": "✅ Contacto sincronizado", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "wf05-v1",
+  "meta": { "instanceId": "agentkit", "templateCredsSetupCompleted": true },
+  "id": "WF05-AGENTKIT",
+  "tags": [{ "createdAt": "2026-05-15", "updatedAt": "2026-05-15", "id": "agentkit", "name": "AgentKit" }]
+}

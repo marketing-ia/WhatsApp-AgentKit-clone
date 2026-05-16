@@ -1,0 +1,584 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║         WHATSAPP AGENTKIT — ECOSISTEMA COMPLETO PARA EASYPANEL             ║
+# ║  Evolution API · n8n · Chatwoot · Supabase (self-hosted) · Lucy Agent      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# INSTRUCCIONES RÁPIDAS:
+#   1. cp .env.example .env  →  llena TODOS los valores marcados con ⚠
+#   2. docker compose up -d
+#   3. Sigue el POST-INSTALL.md para vincular webhooks GHL ↔ n8n
+#
+# RED INTERNA (sin salir a internet):
+#   n8n        → evolution:8080        (enviar mensajes WhatsApp)
+#   n8n        → postgres:5432         (consultar/escribir datos)
+#   n8n        → chatwoot-web:3000     (crear conversaciones / notas)
+#   lucy       → postgres:5432         (historial de conversación)
+#   chatwoot   → postgres:5432         (datos omnicanal)
+#   evolution  → n8n:5678/webhook      (recibir mensajes entrantes)
+
+version: "3.8"
+
+# ── Redes ─────────────────────────────────────────────────────────────────────
+networks:
+  agentkit-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+# ── Volúmenes de persistencia ─────────────────────────────────────────────────
+volumes:
+  postgres-data:          # Supabase DB — ¡NUNCA borrar!
+  redis-data:             # Redis cache
+  n8n-data:               # Flujos y credenciales n8n — ¡NUNCA borrar!
+  evolution-instances:    # Sesiones QR de WhatsApp — ¡NUNCA borrar!
+  evolution-store:        # Mensajes y media de Evolution
+  chatwoot-storage:       # Adjuntos de Chatwoot
+  supabase-storage-data:  # Archivos de Supabase Storage
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 1 — DATOS (PostgreSQL + Redis)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── PostgreSQL 15 (base de Supabase) ─────────────────────────────────────
+  postgres:
+    image: supabase/postgres:15.1.0.117
+    container_name: agentkit-postgres
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "127.0.0.1:5432:5432"   # Solo localhost; Easypanel gestiona acceso externo
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./supabase/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      JWT_SECRET: ${SUPABASE_JWT_SECRET}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (cache para n8n queue mode + Chatwoot) ─────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agentkit-redis
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.11
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 2 — SUPABASE (Auth · REST API · Realtime · Storage · Studio)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  # ── GoTrue — Autenticación ────────────────────────────────────────────────
+  supabase-auth:
+    image: supabase/gotrue:v2.151.0
+    container_name: agentkit-supabase-auth
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.12
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${SUPABASE_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: "postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@postgres:5432/postgres?search_path=auth"
+      GOTRUE_SITE_URL: ${SUPABASE_EXTERNAL_URL}
+      GOTRUE_URI_ALLOW_LIST: "*"
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT}
+      GOTRUE_SMTP_USER: ${SMTP_USER}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_USER}
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_LOG_LEVEL: INFO
+      GOTRUE_OPERATOR_TOKEN: ${SUPABASE_SERVICE_ROLE_KEY}
+
+  # ── PostgREST — REST API sobre PostgreSQL ─────────────────────────────────
+  supabase-rest:
+    image: postgrest/postgrest:v12.0.2
+    container_name: agentkit-supabase-rest
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.13
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: "postgres://authenticator:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      PGRST_DB_SCHEMAS: "public,storage,graphql_public"
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+
+  # ── Realtime — Suscripciones en tiempo real ───────────────────────────────
+  supabase-realtime:
+    image: supabase/realtime:v2.28.32
+    container_name: agentkit-supabase-realtime
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.14
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: supabase_replication_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_SECRET}
+      API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      FLY_ALLOC_ID: fly123
+      FLY_APP_NAME: realtime
+      SECRET_KEY_BASE: ${REALTIME_SECRET}
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+      ENABLE_TAILSCALE: "false"
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+    command: sh -c "/app/bin/migrate && /app/bin/realtime eval 'Realtime.Release.seeds(Realtime.Repo)' && /app/bin/server"
+
+  # ── Storage — Archivos y media ────────────────────────────────────────────
+  supabase-storage:
+    image: supabase/storage-api:v1.0.6
+    container_name: agentkit-supabase-storage
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.15
+    depends_on:
+      postgres:
+        condition: service_healthy
+      supabase-rest:
+        condition: service_started
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    environment:
+      ANON_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      DATABASE_URL: "postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@postgres:5432/postgres"
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: us-east-1
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: "http://imgproxy:8080"
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      POSTGREST_URL: "http://supabase-rest:3000"
+
+  # ── Kong — API Gateway (enruta /auth /rest /storage /realtime) ────────────
+  supabase-kong:
+    image: kong:2.8.1
+    container_name: agentkit-supabase-kong
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.16
+    ports:
+      - "8000:8000"   # Supabase API pública (acceso externo via Easypanel)
+    depends_on:
+      supabase-auth:
+        condition: service_started
+      supabase-rest:
+        condition: service_started
+    volumes:
+      - ./supabase/kong.yml:/home/kong/temp.yml:ro
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: "64 160k"
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      DASHBOARD_USERNAME: ${SUPABASE_DASHBOARD_USER}
+      DASHBOARD_PASSWORD: ${SUPABASE_DASHBOARD_PASS}
+    command: >
+      bash -c "export KONG_DECLARATIVE_CONFIG='/home/kong/kong.yml' &&
+        envsubst < /home/kong/temp.yml > /home/kong/kong.yml &&
+        /docker-entrypoint.sh kong docker-start"
+
+  # ── Supabase Studio — Dashboard visual ───────────────────────────────────
+  supabase-studio:
+    image: supabase/studio:20240422-5cf8f30
+    container_name: agentkit-supabase-studio
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.17
+    ports:
+      - "3002:3000"   # Studio admin UI
+    depends_on:
+      supabase-kong:
+        condition: service_started
+    environment:
+      STUDIO_PG_META_URL: "http://supabase-meta:8080"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: "Marketing IA / Roy Mota"
+      DEFAULT_PROJECT_NAME: "AgentKit"
+      SUPABASE_URL: "http://supabase-kong:8000"
+      SUPABASE_PUBLIC_URL: ${SUPABASE_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+
+  # ── Meta (pg-meta) — Metadata del schema ──────────────────────────────────
+  supabase-meta:
+    image: supabase/postgres-meta:v0.80.0
+    container_name: agentkit-supabase-meta
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.18
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: postgres
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 3 — EVOLUTION API (WhatsApp)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  evolution:
+    image: atendai/evolution-api:v2.2.3
+    container_name: agentkit-evolution
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.20
+    ports:
+      - "8080:8080"   # Evolution API — configura dominio en Easypanel
+    volumes:
+      - evolution-instances:/evolution/instances
+      - evolution-store:/evolution/store
+    environment:
+      # ── Servidor ──────────────────────────────────────────────────────────
+      SERVER_URL: ${EVOLUTION_SERVER_URL}
+      SERVER_PORT: 8080
+      CORS_ORIGIN: "*"
+      CORS_METHODS: "GET,POST,PUT,DELETE"
+      CORS_CREDENTIALS: "true"
+
+      # ── Autenticación ──────────────────────────────────────────────────────
+      AUTHENTICATION_TYPE: apikey
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
+
+      # ── Base de datos (usa Supabase PostgreSQL) ────────────────────────────
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public"
+      DATABASE_CONNECTION_CLIENT_NAME: evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_LABELS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"
+
+      # ── Cache Redis ────────────────────────────────────────────────────────
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      CACHE_REDIS_PREFIX_KEY: "evolution"
+      CACHE_LOCAL_ENABLED: "false"
+
+      # ── Webhook global (n8n recibe TODOS los mensajes) ────────────────────
+      WEBHOOK_GLOBAL_URL: "http://n8n:5678/webhook/evolution"
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
+      WEBHOOK_EVENTS_APPLICATION_STARTUP: "false"
+      WEBHOOK_EVENTS_QRCODE_UPDATED: "true"
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
+      WEBHOOK_EVENTS_MESSAGES_UPDATE: "true"
+      WEBHOOK_EVENTS_MESSAGES_DELETE: "false"
+      WEBHOOK_EVENTS_SEND_MESSAGE: "false"
+      WEBHOOK_EVENTS_CONTACTS_UPSERT: "true"
+      WEBHOOK_EVENTS_CONTACTS_UPDATE: "true"
+      WEBHOOK_EVENTS_PRESENCE_UPDATE: "false"
+      WEBHOOK_EVENTS_CHATS_UPSERT: "false"
+      WEBHOOK_EVENTS_CHATS_UPDATE: "false"
+      WEBHOOK_EVENTS_CONNECTION_UPDATE: "true"
+      WEBHOOK_EVENTS_CALL: "false"
+
+      # ── Chatwoot (handoff a agente humano) ─────────────────────────────────
+      CHATWOOT_ENABLED: "true"
+      CHATWOOT_MESSAGE_READ: "true"
+      CHATWOOT_MESSAGE_DELETE: "true"
+      CHATWOOT_IMPORT_CONTACTS: "true"
+      CHATWOOT_IMPORT_MESSAGES: "true"
+
+      # ── Storage de media ───────────────────────────────────────────────────
+      STORE_MESSAGES: "true"
+      STORE_MESSAGE_UP: "true"
+      STORE_CONTACTS: "true"
+      STORE_CHATS: "true"
+
+      # ── Log ───────────────────────────────────────────────────────────────
+      LOG_LEVEL: ERROR
+      LOG_COLOR: "false"
+      LOG_BAILEYS: "false"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 4 — N8N (Orquestador de flujos)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  n8n:
+    image: n8nio/n8n:1.48.3
+    container_name: agentkit-n8n
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.30
+    ports:
+      - "5678:5678"   # n8n UI — configura dominio en Easypanel
+    volumes:
+      - n8n-data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+    environment:
+      # ── Base de datos ──────────────────────────────────────────────────────
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n_user
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: public
+
+      # ── Servidor ──────────────────────────────────────────────────────────
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_EDITOR_BASE_URL: ${N8N_WEBHOOK_URL}
+      VUE_APP_URL_BASE_API: ${N8N_WEBHOOK_URL}
+
+      # ── Seguridad ─────────────────────────────────────────────────────────
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # ── Ejecución ─────────────────────────────────────────────────────────
+      EXECUTIONS_MODE: regular
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "false"
+      EXECUTIONS_DATA_MAX_AGE: 336
+
+      # ── Email ─────────────────────────────────────────────────────────────
+      N8N_EMAIL_MODE: smtp
+      N8N_SMTP_HOST: ${SMTP_HOST}
+      N8N_SMTP_PORT: ${SMTP_PORT}
+      N8N_SMTP_USER: ${SMTP_USER}
+      N8N_SMTP_PASS: ${SMTP_PASS}
+      N8N_SMTP_SENDER: ${SMTP_USER}
+
+      # ── Variables de integración (accesibles en todos los flujos) ─────────
+      # GHL — Go High Level
+      GHL_API_KEY: ${GHL_API_KEY}
+      GHL_LOCATION_CLINICA: ${GHL_LOCATION_CLINICA}
+      GHL_LOCATION_DENTISTA: ${GHL_LOCATION_DENTISTA}
+      GHL_LOCATION_SEGUROS: ${GHL_LOCATION_SEGUROS}
+      GHL_LOCATION_REALTOR: ${GHL_LOCATION_REALTOR}
+      GHL_BASE_URL: "https://services.leadconnectorhq.com"
+
+      # Supabase (acceso REST desde n8n)
+      SUPABASE_URL: "http://supabase-kong:8000"
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+
+      # Evolution API (interno — máxima velocidad)
+      EVOLUTION_API_URL: "http://evolution:8080"
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+
+      # Chatwoot (interno)
+      CHATWOOT_URL: "http://chatwoot-web:3000"
+      CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
+
+      # Twilio (llamadas)
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER}
+      TWILIO_TRANSFER_NUMBER: ${TWILIO_TRANSFER_NUMBER}
+
+      # Anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # ── Timezone ──────────────────────────────────────────────────────────
+      GENERIC_TIMEZONE: America/New_York
+      TZ: America/New_York
+
+      # ── Logs ──────────────────────────────────────────────────────────────
+      N8N_LOG_LEVEL: warn
+      N8N_DIAGNOSTICS_ENABLED: "false"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 5 — CHATWOOT (Omnicanalidad + Atención humana)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  chatwoot-web:
+    image: chatwoot/chatwoot:v3.11.1
+    container_name: agentkit-chatwoot-web
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.40
+    ports:
+      - "3000:3000"   # Chatwoot UI — configura dominio en Easypanel
+    volumes:
+      - chatwoot-storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: &chatwoot-env
+      # ── Base de datos ──────────────────────────────────────────────────────
+      DATABASE_URL: "postgres://chatwoot_user:${POSTGRES_PASSWORD}@postgres:5432/chatwoot"
+
+      # ── Redis ──────────────────────────────────────────────────────────────
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/1"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      # ── App ───────────────────────────────────────────────────────────────
+      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY}
+      FRONTEND_URL: ${CHATWOOT_EXTERNAL_URL}
+      FORCE_SSL: "false"
+      ENABLE_ACCOUNT_SIGNUP: "false"
+
+      # ── Email ─────────────────────────────────────────────────────────────
+      SMTP_ADDRESS: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASS}
+      SMTP_AUTHENTICATION: plain
+      SMTP_ENABLE_STARTTLS_AUTO: "true"
+      MAILER_FROM_EMAIL: ${SMTP_USER}
+      MAILER_SENDER_NAME: "AgentKit Notifications"
+
+      # ── Storage ───────────────────────────────────────────────────────────
+      ACTIVE_STORAGE_SERVICE: local
+      RAILS_ENV: production
+      NODE_ENV: production
+      RACK_ENV: production
+      RAILS_LOG_TO_STDOUT: "true"
+      LOG_LEVEL: warn
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+
+  chatwoot-worker:
+    image: chatwoot/chatwoot:v3.11.1
+    container_name: agentkit-chatwoot-worker
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.41
+    volumes:
+      - chatwoot-storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chatwoot-web:
+        condition: service_started
+    environment: *chatwoot-env
+    command: bundle exec sidekiq -C config/sidekiq.yml
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CAPA 6 — LUCY (Agente IA — WhatsApp-AgentKit)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+  lucy:
+    # ⚠ Para Easypanel: hacer build y push primero a GHCR o Docker Hub
+    # docker build -t ghcr.io/marketing-ia/lucy:latest . && docker push ...
+    # Luego reemplazar "build: ." por "image: ghcr.io/marketing-ia/lucy:latest"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentkit-lucy
+    restart: unless-stopped
+    networks:
+      agentkit-net:
+        ipv4_address: 172.20.0.50
+    ports:
+      - "8001:8000"   # Lucy API — usa 8001 externo (Kong usa 8000)
+    volumes:
+      - ./knowledge:/app/knowledge
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+    environment:
+      ENVIRONMENT: production
+      PORT: 8000
+
+      # ── IA ────────────────────────────────────────────────────────────────
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # ── WhatsApp Provider ─────────────────────────────────────────────────
+      # Modo Chatwoot: recibe webhooks de Chatwoot (recomendado con este stack)
+      WHATSAPP_PROVIDER: chatwoot
+      CHATWOOT_URL: "http://chatwoot-web:3000"
+      CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
+      CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID}
+
+      # ── Base de datos (historial de conversaciones) ───────────────────────
+      DATABASE_URL: "postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/lucy"
+
+      # ── Evolution API (envío directo desde Lucy si es necesario) ──────────
+      EVOLUTION_API_URL: "http://evolution:8080"
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+
+      # ── GHL ───────────────────────────────────────────────────────────────
+      GHL_API_KEY: ${GHL_API_KEY}

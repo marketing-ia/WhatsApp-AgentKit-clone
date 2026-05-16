@@ -1,0 +1,284 @@
+{
+  "name": "WF-03 — GHL Citas: Confirmación + Recordatorios Automáticos",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ghl-appointment",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "wh-appt-03",
+      "name": "📅 Webhook GHL Cita",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "agentkit-ghl-appointment"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// Solo procesar creación o actualización de citas\nconst validEvents = ['AppointmentCreate', 'AppointmentUpdate', 'BookingCreate'];\nif (!validEvents.includes(body.type) && body.event !== 'appointment') {\n  return [{ json: { skip: true, reason: 'not_appointment: ' + body.type } }];\n}\n\nconst appt = body.appointment || body || {};\nconst contact = appt.contact || body.contact || {};\n\n// Teléfono\nlet phone = (contact.phone || contact.phoneNumber || body.phone || '').replace(/\\D/g, '');\nif (phone.startsWith('1') && phone.length === 11) phone = phone.slice(1);\n\nif (!phone) {\n  return [{ json: { skip: true, reason: 'no_phone' } }];\n}\n\n// Fecha y hora de la cita\nconst apptTimeRaw = appt.startTime || appt.time || body.startTime || body.time;\nif (!apptTimeRaw) {\n  return [{ json: { skip: true, reason: 'no_time' } }];\n}\n\nconst apptTime = new Date(apptTimeRaw);\nconst now = new Date();\n\n// No programar recordatorios si la cita ya pasó\nif (apptTime <= now) {\n  return [{ json: { skip: true, reason: 'appointment_in_past' } }];\n}\n\nconst firstName = contact.firstName || contact.name || body.firstName || 'Cliente';\nconst appointmentId = appt.id || body.appointmentId || body.id || '';\nconst locationId = body.locationId || '';\nconst calendarTitle = appt.title || appt.calendarTitle || 'tu cita';\n\n// Formato de fecha legible\nconst dateStr = apptTime.toLocaleDateString('es-US', {\n  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',\n  timeZone: 'America/New_York'\n});\nconst timeStr = apptTime.toLocaleTimeString('es-US', {\n  hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York'\n});\n\n// Calcular cuándo enviar recordatorios\nconst reminder24h = new Date(apptTime.getTime() - 24 * 60 * 60 * 1000);\nconst reminder1h  = new Date(apptTime.getTime() - 1  * 60 * 60 * 1000);\n\nreturn [{\n  json: {\n    skip: false,\n    phone,\n    firstName,\n    appointmentId,\n    locationId,\n    calendarTitle,\n    apptTimeISO: apptTime.toISOString(),\n    dateStr,\n    timeStr,\n    reminder24hISO: reminder24h.toISOString(),\n    reminder1hISO: reminder1h.toISOString(),\n    confirmMsg: `✅ ¡Hola ${firstName}! Tu cita para *${calendarTitle}* está confirmada para el *${dateStr}* a las *${timeStr}* (hora de Florida). Si necesitas cambiarla, responde aquí. ¡Te esperamos! 🗓️`,\n    reminder24hMsg: `🔔 Hola ${firstName}, te recordamos que mañana tienes cita: *${calendarTitle}* a las *${timeStr}* (hora de Florida). ¡No lo olvides! 😊`,\n    reminder1hMsg: `⏰ Hola ${firstName}, en 1 hora es tu cita: *${calendarTitle}* a las *${timeStr}*. ¡Ya casi! Si tienes alguna pregunta, escríbeme aquí.`\n  }\n}];"
+      },
+      "id": "code-parse-03",
+      "name": "🔍 Parsear Cita GHL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-skip-03",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-03",
+      "name": "❓ ¿Ignorar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip-03",
+      "name": "🚫 Sin acción",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/lucy",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.phone, text: $json.confirmMsg }) }}",
+        "options": {}
+      },
+      "id": "http-confirm-03",
+      "name": "📱 Enviar Confirmación Inmediata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointment_reminders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify([ { appointment_id: $('🔍 Parsear Cita GHL').first().json.appointmentId + '_24h', contact_phone: $('🔍 Parsear Cita GHL').first().json.phone, contact_name: $('🔍 Parsear Cita GHL').first().json.firstName, appointment_time: $('🔍 Parsear Cita GHL').first().json.apptTimeISO, reminder_type: '24h', send_at: $('🔍 Parsear Cita GHL').first().json.reminder24hISO, message: $('🔍 Parsear Cita GHL').first().json.reminder24hMsg, location_id: $('🔍 Parsear Cita GHL').first().json.locationId }, { appointment_id: $('🔍 Parsear Cita GHL').first().json.appointmentId + '_1h', contact_phone: $('🔍 Parsear Cita GHL').first().json.phone, contact_name: $('🔍 Parsear Cita GHL').first().json.firstName, appointment_time: $('🔍 Parsear Cita GHL').first().json.apptTimeISO, reminder_type: '1h', send_at: $('🔍 Parsear Cita GHL').first().json.reminder1hISO, message: $('🔍 Parsear Cita GHL').first().json.reminder1hMsg, location_id: $('🔍 Parsear Cita GHL').first().json.locationId } ]) }}",
+        "options": {}
+      },
+      "id": "http-schedule-03",
+      "name": "💾 Programar Recordatorios en DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 360]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end-03",
+      "name": "✅ Cita procesada",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1340, 360]
+    },
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] }
+      },
+      "id": "sched-03",
+      "name": "⏰ Cada 15 min — Revisar Recordatorios",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 600]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointment_reminders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "sent", "value": "eq.false" },
+            { "name": "send_at", "value": "=lte.{{ new Date().toISOString() }}" },
+            { "name": "select", "value": "*" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-get-reminders-03",
+      "name": "📋 Obtener Recordatorios Pendientes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 600]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-has-reminders",
+              "leftValue": "={{ Array.isArray($json) && $json.length > 0 }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-has-reminders-03",
+      "name": "❓ ¿Hay recordatorios?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 600]
+    },
+    {
+      "parameters": {},
+      "id": "noop-no-reminders",
+      "name": "😴 Sin recordatorios",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 500]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "={{ $json }}",
+        "options": {}
+      },
+      "id": "split-reminders-03",
+      "name": "🔄 Separar por Recordatorio",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 680]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/lucy",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.contact_phone, text: $json.message }) }}",
+        "options": {}
+      },
+      "id": "http-send-reminder-03",
+      "name": "📱 Enviar Recordatorio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 680]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointment_reminders",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "appointment_id", "value": "=eq.{{ $('🔄 Separar por Recordatorio').item.json.appointment_id }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sent: true, sent_at: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "id": "http-mark-sent-03",
+      "name": "✅ Marcar Enviado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 680]
+    }
+  ],
+  "connections": {
+    "📅 Webhook GHL Cita": {
+      "main": [[{ "node": "🔍 Parsear Cita GHL", "type": "main", "index": 0 }]]
+    },
+    "🔍 Parsear Cita GHL": {
+      "main": [[{ "node": "❓ ¿Ignorar?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Ignorar?": {
+      "main": [
+        [{ "node": "🚫 Sin acción", "type": "main", "index": 0 }],
+        [{ "node": "📱 Enviar Confirmación Inmediata", "type": "main", "index": 0 }]
+      ]
+    },
+    "📱 Enviar Confirmación Inmediata": {
+      "main": [[{ "node": "💾 Programar Recordatorios en DB", "type": "main", "index": 0 }]]
+    },
+    "💾 Programar Recordatorios en DB": {
+      "main": [[{ "node": "✅ Cita procesada", "type": "main", "index": 0 }]]
+    },
+    "⏰ Cada 15 min — Revisar Recordatorios": {
+      "main": [[{ "node": "📋 Obtener Recordatorios Pendientes", "type": "main", "index": 0 }]]
+    },
+    "📋 Obtener Recordatorios Pendientes": {
+      "main": [[{ "node": "❓ ¿Hay recordatorios?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Hay recordatorios?": {
+      "main": [
+        [{ "node": "😴 Sin recordatorios", "type": "main", "index": 0 }],
+        [{ "node": "🔄 Separar por Recordatorio", "type": "main", "index": 0 }]
+      ]
+    },
+    "🔄 Separar por Recordatorio": {
+      "main": [[{ "node": "📱 Enviar Recordatorio", "type": "main", "index": 0 }]]
+    },
+    "📱 Enviar Recordatorio": {
+      "main": [[{ "node": "✅ Marcar Enviado", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "wf03-v1",
+  "meta": { "instanceId": "agentkit", "templateCredsSetupCompleted": true },
+  "id": "WF03-AGENTKIT",
+  "tags": [{ "createdAt": "2026-05-15", "updatedAt": "2026-05-15", "id": "agentkit", "name": "AgentKit" }]
+}

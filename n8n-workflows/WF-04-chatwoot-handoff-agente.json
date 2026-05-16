@@ -1,0 +1,137 @@
+{
+  "name": "WF-04 — Chatwoot Handoff: Notificar Agente Humano",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chatwoot-handoff",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "wh-cw-04",
+      "name": "💬 Webhook Chatwoot",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "agentkit-chatwoot-handoff"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// Eventos relevantes de Chatwoot\n// - conversation_created: nueva conversación (inbound)\n// - conversation_status_changed: cambio de estado (pendiente → asignado)\n// - label_created: se añadió una etiqueta (ej: 'requires_human')\nconst event = body.event || body.type || '';\nconst validEvents = ['conversation_created', 'conversation_updated', 'label_created', 'conversation_status_changed'];\n\nif (!validEvents.includes(event)) {\n  return [{ json: { skip: true, reason: 'event_ignored: ' + event } }];\n}\n\nconst conv = body.conversation || body || {};\nconst contact = conv.meta?.sender || conv.contact || body.contact || {};\nconst agent = conv.meta?.assignee || conv.assignee || null;\nconst labels = conv.labels || body.labels || [];\n\n// Solo notificar si hay etiqueta de humano o si la IA pausó\nconst needsHuman = labels.includes('requires_human') || \n                   labels.includes('human_requested') ||\n                   conv.status === 'pending' ||\n                   (event === 'conversation_created' && !agent);\n\nif (!needsHuman) {\n  return [{ json: { skip: true, reason: 'no_human_needed', status: conv.status, labels } }];\n}\n\nconst contactName  = contact.name || 'Cliente';\nconst contactPhone = (contact.phone_number || '').replace(/\\D/g, '').replace(/^1/, '');\nconst convId       = conv.id || body.conversation_id || '';\nconst convUrl      = `${$env.CHATWOOT_EXTERNAL_URL || 'https://chat.tudominio.com'}/app/accounts/1/conversations/${convId}`;\nconst inboxName    = conv.inbox_name || conv.channel || 'WhatsApp';\nconst lastMessage  = conv.last_activity_at || '';\n\n// Teléfono del agente a notificar (Roy o el equipo)\nconst agentPhone = $env.AGENT_WHATSAPP || $env.TWILIO_TRANSFER_NUMBER || '';\nconst agentPhoneClean = agentPhone.replace(/\\D/g, '').replace(/^1/, '');\n\nif (!agentPhoneClean) {\n  return [{ json: { skip: true, reason: 'no_agent_phone_configured' } }];\n}\n\nconst notifMsg = `🔴 *Atención requerida* — ${inboxName}\\n\\n` +\n  `👤 Cliente: *${contactName}*\\n` +\n  (contactPhone ? `📱 Teléfono: +1${contactPhone}\\n` : '') +\n  `💬 Conversación: ${convUrl}\\n\\n` +\n  `El cliente pidió hablar con una persona. Responde en Chatwoot o llámalo directamente.`;\n\nreturn [{\n  json: {\n    skip: false,\n    agentPhone: agentPhoneClean,\n    contactName,\n    contactPhone,\n    convId,\n    convUrl,\n    notifMsg,\n    event\n  }\n}];"
+      },
+      "id": "code-parse-04",
+      "name": "🔍 Parsear Evento Chatwoot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-skip-04",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-04",
+      "name": "❓ ¿Ignorar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip-04",
+      "name": "🚫 Sin acción",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/lucy",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $json.agentPhone, text: $json.notifMsg }) }}",
+        "options": {}
+      },
+      "id": "http-notify-agent-04",
+      "name": "📲 Notificar Agente por WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CHATWOOT_URL || 'http://chatwoot-web:3000' }}/api/v1/accounts/1/conversations/{{ $json.convId }}/labels",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "api_access_token", "value": "={{ $env.CHATWOOT_API_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"labels\": [\"agent_notified\"] }",
+        "options": {}
+      },
+      "id": "http-label-04",
+      "name": "🏷 Etiquetar Conversación",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 380]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end-04",
+      "name": "✅ Agente notificado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1340, 380]
+    }
+  ],
+  "connections": {
+    "💬 Webhook Chatwoot": {
+      "main": [[{ "node": "🔍 Parsear Evento Chatwoot", "type": "main", "index": 0 }]]
+    },
+    "🔍 Parsear Evento Chatwoot": {
+      "main": [[{ "node": "❓ ¿Ignorar?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Ignorar?": {
+      "main": [
+        [{ "node": "🚫 Sin acción", "type": "main", "index": 0 }],
+        [{ "node": "📲 Notificar Agente por WhatsApp", "type": "main", "index": 0 }]
+      ]
+    },
+    "📲 Notificar Agente por WhatsApp": {
+      "main": [[{ "node": "🏷 Etiquetar Conversación", "type": "main", "index": 0 }]]
+    },
+    "🏷 Etiquetar Conversación": {
+      "main": [[{ "node": "✅ Agente notificado", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "wf04-v1",
+  "meta": { "instanceId": "agentkit", "templateCredsSetupCompleted": true },
+  "id": "WF04-AGENTKIT",
+  "tags": [{ "createdAt": "2026-05-15", "updatedAt": "2026-05-15", "id": "agentkit", "name": "AgentKit" }]
+}

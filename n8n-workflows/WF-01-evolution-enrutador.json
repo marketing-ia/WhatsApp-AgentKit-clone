@@ -1,0 +1,254 @@
+{
+  "name": "WF-01 — Evolution: Enrutador STOP/CONTINUAR + Logging",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "evolution",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "wh-evo-01",
+      "name": "📨 Webhook Evolution",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "agentkit-evolution-main"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// Solo procesar mensajes entrantes\nif (body.event !== 'messages.upsert') {\n  return [{ json: { skip: true, reason: 'event_' + (body.event || 'unknown') } }];\n}\n\nconst data = body.data || {};\nconst key = data.key || {};\n\n// Ignorar mensajes propios\nif (key.fromMe === true) {\n  return [{ json: { skip: true, reason: 'fromMe' } }];\n}\n\nconst jid = key.remoteJid || '';\nconst phone = jid.replace(/@s\\.whatsapp\\.net$/, '').replace(/@g\\.us$/, '');\nconst isGroup = jid.includes('@g.us');\n\n// Extraer texto del mensaje\nconst msg = data.message || {};\nconst text = (\n  msg.conversation ||\n  (msg.extendedTextMessage && msg.extendedTextMessage.text) ||\n  (msg.imageMessage && msg.imageMessage.caption) ||\n  (msg.videoMessage && msg.videoMessage.caption) ||\n  ''\n).trim();\n\nif (!text) {\n  return [{ json: { skip: true, reason: 'no_text', msgType: data.messageType } }];\n}\n\n// Detectar comandos STOP / CONTINUAR\nconst cmd = text.toUpperCase().trim();\nconst isStop      = ['STOP', 'PARA', 'PARAR', 'DETENER', 'ALTO', 'HUMANO'].includes(cmd);\nconst isContinuar = ['CONTINUAR', 'CONTINUA', 'REANUDAR', 'ACTIVAR', 'LUCY'].includes(cmd);\n\nreturn [{\n  json: {\n    skip: false,\n    isStop,\n    isContinuar,\n    isCommand: isStop || isContinuar,\n    phone,\n    jid,\n    isGroup,\n    text,\n    pushName: data.pushName || 'Cliente',\n    instance: body.instance || 'lucy',\n    messageId: key.id || '',\n    ts: data.messageTimestamp || Math.floor(Date.now() / 1000)\n  }\n}];"
+      },
+      "id": "code-parse-01",
+      "name": "🔍 Parsear Mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip-01",
+      "name": "❓ ¿Ignorar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-skip-01",
+      "name": "🚫 Ignorado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 160]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-stop",
+              "leftValue": "={{ $json.isStop }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-stop-01",
+      "name": "🛑 ¿Es STOP?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LUCY_API_URL || 'http://lucy:8000' }}/admin/pausa/{{ $json.phone }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "motivo", "value": "cliente envió STOP" }]
+        },
+        "options": {}
+      },
+      "id": "http-pause-01",
+      "name": "⏸ Pausar Lucy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/{{ $('🔍 Parsear Mensaje').first().json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('🔍 Parsear Mensaje').first().json.phone, text: '✋ Entendido, ' + $('🔍 Parsear Mensaje').first().json.pushName + '. Te conecto con un asesor del equipo. En breve alguien se comunicará contigo 🙏' }) }}",
+        "options": {}
+      },
+      "id": "http-send-stop-01",
+      "name": "📤 Confirmar STOP al cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 260]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c-continuar",
+              "leftValue": "={{ $json.isContinuar }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-continuar-01",
+      "name": "▶️ ¿Es CONTINUAR?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LUCY_API_URL || 'http://lucy:8000' }}/admin/reanudar/{{ $('🔍 Parsear Mensaje').first().json.phone }}",
+        "options": {}
+      },
+      "id": "http-resume-01",
+      "name": "▶️ Reanudar Lucy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL || 'http://evolution:8080' }}/message/sendText/{{ $('🔍 Parsear Mensaje').first().json.instance }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('🔍 Parsear Mensaje').first().json.phone, text: '¡Hola de nuevo, ' + $('🔍 Parsear Mensaje').first().json.pushName + '! 👋 Lucy está de vuelta. ¿En qué te puedo ayudar hoy?' }) }}",
+        "options": {}
+      },
+      "id": "http-send-continuar-01",
+      "name": "📤 Confirmar CONTINUAR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1560, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/message_logs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone: $json.phone, push_name: $json.pushName, text: $json.text, instance: $json.instance, message_id: $json.messageId, is_stop: $json.isStop, is_continuar: $json.isContinuar }) }}",
+        "options": {}
+      },
+      "id": "http-log-01",
+      "name": "💾 Log en Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 600]
+    },
+    {
+      "parameters": {},
+      "id": "noop-end-01",
+      "name": "🏁 Fin",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1780, 420]
+    }
+  ],
+  "connections": {
+    "📨 Webhook Evolution": {
+      "main": [[{ "node": "🔍 Parsear Mensaje", "type": "main", "index": 0 }]]
+    },
+    "🔍 Parsear Mensaje": {
+      "main": [[{ "node": "❓ ¿Ignorar?", "type": "main", "index": 0 }]]
+    },
+    "❓ ¿Ignorar?": {
+      "main": [
+        [{ "node": "🚫 Ignorado", "type": "main", "index": 0 }],
+        [{ "node": "🛑 ¿Es STOP?", "type": "main", "index": 0 }]
+      ]
+    },
+    "🛑 ¿Es STOP?": {
+      "main": [
+        [{ "node": "⏸ Pausar Lucy", "type": "main", "index": 0 }],
+        [{ "node": "▶️ ¿Es CONTINUAR?", "type": "main", "index": 0 }]
+      ]
+    },
+    "⏸ Pausar Lucy": {
+      "main": [[{ "node": "📤 Confirmar STOP al cliente", "type": "main", "index": 0 }]]
+    },
+    "📤 Confirmar STOP al cliente": {
+      "main": [[{ "node": "🏁 Fin", "type": "main", "index": 0 }]]
+    },
+    "▶️ ¿Es CONTINUAR?": {
+      "main": [
+        [{ "node": "▶️ Reanudar Lucy", "type": "main", "index": 0 }],
+        [{ "node": "💾 Log en Supabase", "type": "main", "index": 0 }]
+      ]
+    },
+    "▶️ Reanudar Lucy": {
+      "main": [[{ "node": "📤 Confirmar CONTINUAR", "type": "main", "index": 0 }]]
+    },
+    "📤 Confirmar CONTINUAR": {
+      "main": [[{ "node": "🏁 Fin", "type": "main", "index": 0 }]]
+    },
+    "💾 Log en Supabase": {
+      "main": [[{ "node": "🏁 Fin", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "wf01-v1",
+  "meta": { "instanceId": "agentkit", "templateCredsSetupCompleted": true },
+  "id": "WF01-AGENTKIT",
+  "tags": [{ "createdAt": "2026-05-15", "updatedAt": "2026-05-15", "id": "agentkit", "name": "AgentKit" }]
+}
