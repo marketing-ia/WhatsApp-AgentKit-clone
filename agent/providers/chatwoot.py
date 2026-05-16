@@ -51,17 +51,24 @@ class ProveedorChatwoot(ProveedorWhatsApp):
         if message_type != 0:
             return []
 
-        # Ignorar si no hay contenido de texto
-        contenido = body.get("content", "").strip()
-        if not contenido:
-            return []
-
         # Datos de la conversación
         conversacion = body.get("conversation", {})
         conversation_id = str(conversacion.get("id", ""))
 
         if not conversation_id:
             logger.warning("Webhook sin conversation_id — ignorado")
+            return []
+
+        # Ignorar mensajes de grupos de WhatsApp (@g.us) — Lucy solo atiende mensajes directos
+        sender = body.get("sender", {})
+        sender_identifier = sender.get("identifier", "") or ""
+        if "@g.us" in sender_identifier:
+            logger.debug(f"Mensaje de grupo ignorado — JID: {sender_identifier}")
+            return []
+
+        # Ignorar si no hay contenido de texto
+        contenido = body.get("content", "").strip()
+        if not contenido:
             return []
 
         # Si hay un agente humano asignado, Lucy no interrumpe
@@ -82,8 +89,6 @@ class ProveedorChatwoot(ProveedorWhatsApp):
             logger.debug(f"Mensaje de inbox {inbox_id} ignorado (solo proceso {self.inbox_id})")
             return []
 
-        # Datos del remitente
-        sender = body.get("sender", {})
         nombre_remitente = sender.get("name", "Cliente")
         mensaje_id = str(body.get("id", ""))
 
